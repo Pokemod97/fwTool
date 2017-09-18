@@ -18,8 +18,12 @@ PrintConsole bottomScreen;
 u8 nandcid[16];
 u8 consoleid[8];
 
+swiSHA1context_t sha1ctx;
+
+int saveSHA1File(const char *filename);
+
 //---------------------------------------------------------------------------------
-int saveToFile(const char *filename, u8 *buffer, size_t size) {
+int saveToFile(const char *filename, u8 *buffer, size_t size, bool saveSHA1) {
 //---------------------------------------------------------------------------------
 	FILE *f = fopen(filename, "wb");
 	if (NULL==f) return -1;
@@ -31,7 +35,36 @@ int saveToFile(const char *filename, u8 *buffer, size_t size) {
 	} else {
 		iprintf("saved %s.\n", filename);
 	}
+	if (saveSHA1) {
+		sha1ctx.sha_block = 0;
+		swiSHA1Init(&sha1ctx);
+		swiSHA1Update(&sha1ctx, buffer, size);
+		saveSHA1File(filename);
+	}
 	return 0;
+}
+
+//---------------------------------------------------------------------------------
+int saveSHA1File(const char *filename) {
+//---------------------------------------------------------------------------------
+	size_t len_fn = strlen(filename);
+	char *sha1_fn = (char *)malloc(len_fn + 6);
+	siprintf(sha1_fn, "%s.sha1", filename);
+	// 20 bytes each use 2 chars, space, asterisk, filename, new line
+	size_t len_buf = 2 * 20 + 1 + 1 + len_fn + 1;
+	char *sha1_buf = (char *)malloc(len_buf + 1); // extra for \0
+	char *p = sha1_buf;
+	char *digest = (char *)malloc(20);
+	swiSHA1Final(digest, &sha1ctx);
+	for (int i = 0; i < 20; ++i) {
+		p += siprintf(p, "%02X", digest[i]);
+	}
+	free(digest);
+	siprintf(p, " *%s\n", filename);
+	int ret = saveToFile(sha1_fn, (u8*)sha1_buf, len_buf, false);
+	free(sha1_fn);
+	free(sha1_buf);
+	return ret;
 }
 
 //---------------------------------------------------------------------------------
@@ -77,7 +110,7 @@ void backupFirmware() {
 
 	readFirmware(0, firmware_buffer, fwSize);
 
-	saveToFile("firmware.bin", firmware_buffer, fwSize);
+	saveToFile("firmware.bin", firmware_buffer, fwSize, true);
 
 }
 
@@ -131,8 +164,8 @@ void backupBIOS() {
 		if ((REG_SCFG_ROM & 0x02)!=dsbios) {
 			dumpBIOS(firmware_buffer);
 			memcpy(firmware_buffer,arm7bios,sizeof(arm7bios));
-			saveToFile("bios7.bin", firmware_buffer, 16 * 1024 );
-			saveToFile("bios9.bin", (u8*)0xffff0000, 32 * 1024 );
+			saveToFile("bios7.bin", firmware_buffer, 16 * 1024, true);
+			saveToFile("bios9.bin", (u8*)0xffff0000, 32 * 1024, true);
 			flipBIOS();
 
 		}
@@ -152,8 +185,8 @@ void backupBIOS() {
 
 	dumpBIOS(firmware_buffer);
 	memcpy(firmware_buffer,vectors,32);
-	saveToFile(arm9file, (u8*)0xffff0000, arm9size );
-	saveToFile(arm7file, firmware_buffer, arm7size);
+	saveToFile(arm9file, (u8*)0xffff0000, arm9size, true);
+	saveToFile(arm7file, firmware_buffer, arm7size, true);
 
 }
 
@@ -165,7 +198,7 @@ void backupSettings() {
 
 	readFirmware(userSettingsOffset, firmware_buffer + userSettingsOffset, 512);
 
-	if (saveToFile("UserSettings.bin", firmware_buffer + userSettingsOffset, 512) < 0) {
+	if (saveToFile("UserSettings.bin", firmware_buffer + userSettingsOffset, 512, true) < 0) {
 		iprintf("Error saving settings1!\n");
 	} else {
 		iprintf("User settings saved as\n\n%s/UserSettings.bin", dirname );
@@ -180,7 +213,7 @@ void backupWifi() {
 
 	readFirmware(wifiOffset, firmware_buffer + wifiOffset, wifiSize);
 
-	if (saveToFile("WifiSettings.bin", firmware_buffer + wifiOffset, wifiSize) < 0) {
+	if (saveToFile("WifiSettings.bin", firmware_buffer + wifiOffset, wifiSize, true) < 0) {
 		iprintf("Error saving Wifi settings!\n");
 	} else {
 		iprintf("Wifi settings saved as\n\n%s/WifiSettings.bin", dirname );
@@ -198,20 +231,24 @@ void backupNAND() {
 		iprintf("Not a DSi!\n");
 	} else {
 
-		FILE *f = fopen("nand.bin", "wb");
+		const char *filename = "nand.bin";
+		FILE *f = fopen(filename, "wb");
 
 		if (NULL == f) {
-			iprintf("failure creating nand.bin\n");
+			iprintf("failure creating %s\n", filename);
 		} else {
-			iprintf("Writing %s/nand.bin\n\n", dirname );
+			iprintf("Writing %s/%s\n\n", dirname, filename);
 			size_t i;
 			size_t sectors = 128;
 			size_t blocks = nand_GetSize() / sectors;
+			sha1ctx.sha_block = 0;
+			swiSHA1Init(&sha1ctx);
 			for (i=0; i < blocks; i++) {
 				if(!nand_ReadSectors(i * sectors,sectors,firmware_buffer)) {
 					iprintf("\nError reading NAND!\n");
 					break;
 				}
+				swiSHA1Update(&sha1ctx, firmware_buffer, 512 * sectors);
 				size_t written = fwrite(firmware_buffer, 1, 512 * sectors, f);
 				if(written != 512 * sectors) {
 					iprintf("\nError writing to SD!\n");
@@ -220,6 +257,7 @@ void backupNAND() {
 				iprintf("Block %d of %d\r", i+1, blocks);
 			}
 			fclose(f);
+			saveSHA1File(filename);
 		}
 	}
 
